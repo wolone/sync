@@ -1,15 +1,13 @@
 name: 【稳定版】定时同步 Frappe 仓库到 CNB（保留自定义分支）
 on:
-  # 定时触发：每天北京时间 03:00 执行（UTC+8，对应 UTC 19:00）
   schedule:
     - cron: '0 19 * * *'
-  # 手动触发：支持在 GitHub 仓库页面手动点击执行
   workflow_dispatch:
     inputs:
       sync_mode:
         description: '同步模式'
         required: true
-        default: 'full' # 全量同步（默认）
+        default: 'full'
         type: choice
         options:
           - full: 全量同步所有仓库
@@ -22,19 +20,14 @@ on:
 jobs:
   sync-frappe-to-cnb:
     runs-on: ubuntu-latest
-    timeout-minutes: 120 # 超时时间（防止同步大仓库卡住）
+    timeout-minutes: 120
     steps:
-      ###########################################################################
-      # 步骤1：环境准备 + 依赖安装（基础工具+错误处理）
-      ###########################################################################
       - name: 🔧 安装核心依赖（Git、jq、curl、重试工具）
         run: |
           apt-get update && apt-get install -y --no-install-recommends \
             git jq curl ca-certificates
-          # 安装重试工具（应对网络波动）
           curl -fsSL https://github.com/kadwanev/retry/releases/download/v0.11.0/retry-linux-amd64 -o /usr/local/bin/retry
           chmod +x /usr/local/bin/retry
-          # 验证依赖
           git --version
           jq --version
           curl --version
@@ -48,25 +41,18 @@ jobs:
           [ -n "${{ github.event.inputs.repo_name }}" ] && echo "指定仓库：${{ github.event.inputs.repo_name }}" >> sync_logs.txt
           echo "CNB 用户名：cnb（固定）" >> sync_logs.txt
 
-      ###########################################################################
-      # 步骤2：动态获取需要同步的仓库列表（支持全量/单个仓库）
-      ###########################################################################
       - name: 📥 动态获取 Frappe 全量仓库列表（全量模式）
         if: github.event.inputs.sync_mode == 'full'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub 内置令牌（无需额外配置）
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "开始从 GitHub API 获取 Frappe 所有公开仓库..." >> sync_logs.txt
           PAGE=1
           ALL_REPOS=()
-          # 分页获取（处理超过100个仓库的场景）
           while true; do
-            # 调用 GitHub API（带重试，最多3次）
             RESPONSE=$(retry -n 3 -d 5 curl -s -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/orgs/frappe/repos?per_page=100&page=$PAGE&type=public")
-            # 检查 API 响应是否有效
             if echo "$RESPONSE" | jq -e . > /dev/null 2>&1; then
-              # 过滤非 fork 仓库，提取仓库名
               REPOS=$(echo "$RESPONSE" | jq -r '.[] | select(.fork == false) | .name')
               if [ -z "$REPOS" ] || [ "$REPOS" == "null" ]; then
                 echo "已获取所有仓库，共 ${#ALL_REPOS[@]} 个" >> sync_logs.txt
@@ -78,11 +64,9 @@ jobs:
             else
               echo "⚠️ 第 $PAGE 页仓库获取失败，跳过该页" >> sync_logs.txt
               PAGE=$((PAGE + 1))
-              # 超过10页仍失败则停止（避免无限循环）
               [ $PAGE -gt 10 ] && break
             fi
           done
-          # 保存仓库列表到环境变量（供后续步骤使用）
           echo "REPOS_LIST=${ALL_REPOS[*]}" >> $GITHUB_ENV
           echo "最终待同步仓库数：${#ALL_REPOS[@]}" >> sync_logs.txt
 
@@ -93,7 +77,6 @@ jobs:
             echo "❌ 单个模式必须指定仓库名" >> sync_logs.txt
             exit 1
           fi
-          # 验证仓库是否存在于 GitHub frappe 组织
           GITHUB_REPO_URL="https://github.com/frappe/${{ github.event.inputs.repo_name }}"
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$GITHUB_REPO_URL")
           if [ "$HTTP_CODE" -ne 200 ]; then
@@ -103,24 +86,20 @@ jobs:
           echo "REPOS_LIST=${{ github.event.inputs.repo_name }}" >> $GITHUB_ENV
           echo "待同步仓库：${{ github.event.inputs.repo_name }}" >> sync_logs.txt
 
-      ###########################################################################
-      # 步骤3：Git 配置 + CNB 权限校验（固定用户名 cnb）
-      ###########################################################################
-      - name: 🔐 配置 Git 身份（用于提交同步记录）
+      - name: 🔐 配置 Git 身份
         run: |
           git config --global user.name "CNB-Sync-Bot"
           git config --global user.email "sync-bot@cnb.cool"
-          git config --global pull.rebase false # 禁用 rebase，避免冲突
+          git config --global pull.rebase false
           echo "Git 身份配置完成" >> sync_logs.txt
 
       - name: ✅ 校验 CNB 访问权限（用户名：cnb）
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          CNB_USERNAME: "cnb" # 固定用户名，无需配置 Secret
+          CNB_USERNAME: "cnb"
           CNB_API_URL: "https://api.cnb.cool"
         run: |
           echo "开始校验 CNB 权限（用户名：$CNB_USERNAME）..." >> sync_logs.txt
-          # 调用 CNB API 校验令牌有效性（假设 /user 接口返回用户信息）
           RESPONSE=$(retry -n 2 -d 3 curl -s -H "Authorization: token $CNB_TOKEN" "$CNB_API_URL/user")
           if echo "$RESPONSE" | jq -e '.username' > /dev/null 2>&1; then
             CNB_ACTUAL_USER=$(echo "$RESPONSE" | jq -r '.username')
@@ -135,25 +114,19 @@ jobs:
             exit 1
           fi
 
-      ###########################################################################
-      # 步骤4：核心同步逻辑（保留自定义分支，增量更新）
-      ###########################################################################
       - name: 🚀 循环同步仓库到 CNB（用户名：cnb）
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          CNB_USERNAME: "cnb" # 固定用户名
+          CNB_USERNAME: "cnb"
           CNB_API_URL: "https://api.cnb.cool"
         run: |
-          # 遍历所有待同步仓库
+          FAIL_FLAG=0
           for REPO_NAME in $REPOS_LIST; do
             echo -e "\n=== 开始同步仓库：$REPO_NAME ===" >> sync_logs.txt
             GITHUB_REPO="https://github.com/frappe/$REPO_NAME.git"
-            CNB_REPO="https://$CNB_USERNAME:$CNB_TOKEN@api.cnb.cool/$CNB_USERNAME/$REPO_NAME.git" # 免密推送（固定用户名）
+            CNB_REPO="https://$CNB_USERNAME:$CNB_TOKEN@api.cnb.cool/$CNB_USERNAME/$REPO_NAME.git"
             TEMP_REPO_DIR="temp_$REPO_NAME"
 
-            #######################################
-            # 子步骤4.1：检查并创建 CNB 仓库
-            #######################################
             echo "1. 检查 CNB 仓库是否存在..." >> sync_logs.txt
             CNB_REPO_CHECK_URL="$CNB_API_URL/repos/$CNB_USERNAME/$REPO_NAME"
             HTTP_CODE=$(retry -n 2 -d 3 curl -s -o /dev/null -w "%{http_code}" \
@@ -163,7 +136,6 @@ jobs:
               echo "✅ CNB 仓库已存在：$CNB_USERNAME/$REPO_NAME" >> sync_logs.txt
             elif [ "$HTTP_CODE" -eq 404 ]; then
               echo "⚠️ CNB 仓库不存在，开始创建：$CNB_USERNAME/$REPO_NAME" >> sync_logs.txt
-              # 调用 CNB API 创建仓库（适配 CNB API 格式，若有差异需调整参数）
               CREATE_RESPONSE=$(retry -n 2 -d 5 curl -s -X POST \
                 -H "Authorization: token $CNB_TOKEN" \
                 -H "Content-Type: application/json" \
@@ -175,101 +147,85 @@ jobs:
                   "gitignore_template": "Python"
                 }' \
                 "$CNB_API_URL/user/repos")
-              # 检查创建结果
               if echo "$CREATE_RESPONSE" | jq -e '.name' > /dev/null 2>&1; then
                 echo "✅ CNB 仓库创建成功：$CNB_USERNAME/$REPO_NAME" >> sync_logs.txt
               else
                 echo "❌ CNB 仓库创建失败（响应：$CREATE_RESPONSE）" >> sync_logs.txt
-                continue # 跳过该仓库，继续同步下一个
+                FAIL_FLAG=1
+                continue
               fi
             else
               echo "❌ 仓库检查失败（HTTP 状态码：$HTTP_CODE）" >> sync_logs.txt
+              FAIL_FLAG=1
               continue
             fi
 
-            #######################################
-            # 子步骤4.2：克隆仓库（优先拉取 CNB 仓库，保留自定义分支）
-            #######################################
             echo "2. 克隆仓库..." >> sync_logs.txt
             if git clone --depth 1 $CNB_REPO $TEMP_REPO_DIR; then
               echo "✅ 成功克隆 CNB 仓库（保留自定义分支）" >> sync_logs.txt
               cd $TEMP_REPO_DIR
-              # 添加 GitHub 源仓库为上游（用于拉取更新）
               git remote add upstream $GITHUB_REPO 2>/dev/null || git remote set-url upstream $GITHUB_REPO
             else
               echo "⚠️ CNB 仓库克隆失败，尝试直接克隆 GitHub 源仓库" >> sync_logs.txt
               if git clone $GITHUB_REPO $TEMP_REPO_DIR; then
                 echo "✅ 成功克隆 GitHub 源仓库" >> sync_logs.txt
                 cd $TEMP_REPO_DIR
-                git remote set-url origin $CNB_REPO # 关联 CNB 仓库
+                git remote set-url origin $CNB_REPO
               else
                 echo "❌ 仓库克隆失败，跳过该仓库" >> sync_logs.txt
+                FAIL_FLAG=1
                 rm -rf $TEMP_REPO_DIR
                 continue
               fi
             fi
 
-            #######################################
-            # 子步骤4.3：增量同步 GitHub 所有分支/标签
-            #######################################
             echo "3. 同步 GitHub 分支和标签..." >> sync_logs.txt
-            # 拉取 GitHub 源仓库所有分支和标签（带重试）
             if retry -n 3 -d 5 git fetch upstream --all --tags; then
               echo "✅ 成功拉取 GitHub 所有分支和标签" >> sync_logs.txt
             else
               echo "❌ 拉取 GitHub 分支失败，跳过该仓库" >> sync_logs.txt
+              FAIL_FLAG=1
               cd .. && rm -rf $TEMP_REPO_DIR
               continue
             fi
 
-            # 同步所有分支（存在则合并，不存在则创建，不删除自定义分支）
             for BRANCH in $(git branch -r | grep upstream/ | sed 's/upstream\///' | grep -v HEAD); do
               echo "  - 处理分支：$BRANCH" >> sync_logs.txt
-              # 切换分支（不存在则创建）
               if git checkout -B $BRANCH upstream/$BRANCH 2>/dev/null; then
                 echo "    ✅ 分支 $BRANCH 不存在，创建并同步" >> sync_logs.txt
               else
-                # 分支已存在，合并上游更新
                 git checkout $BRANCH
                 if git merge upstream/$BRANCH --no-edit; then
                   echo "    ✅ 分支 $BRANCH 合并更新成功" >> sync_logs.txt
                 else
                   echo "    ⚠️ 分支 $BRANCH 合并冲突，尝试放弃本地修改并同步" >> sync_logs.txt
                   git merge --abort 2>/dev/null
-                  git reset --hard upstream/$BRANCH # 冲突时以 GitHub 分支为准
+                  git reset --hard upstream/$BRANCH
                   echo "    ✅ 已强制同步上游分支 $BRANCH" >> sync_logs.txt
                 fi
               fi
             done
 
-            # 同步所有标签
             git push origin --tags 2>/dev/null && echo "✅ 标签同步完成" >> sync_logs.txt || echo "⚠️ 标签同步无变更" >> sync_logs.txt
 
-            #######################################
-            # 子步骤4.4：推送同步结果到 CNB
-            #######################################
             echo "4. 推送结果到 CNB..." >> sync_logs.txt
             if git push origin --all; then
               echo "✅ 仓库 $REPO_NAME 同步完成" >> sync_logs.txt
             else
               echo "❌ 仓库 $REPO_NAME 推送失败" >> sync_logs.txt
+              FAIL_FLAG=1
             fi
 
-            #######################################
-            # 子步骤4.5：清理临时文件
-            #######################################
             cd .. && rm -rf $TEMP_REPO_DIR
             echo "5. 临时文件清理完成" >> sync_logs.txt
           done
+          # 将失败标记写入环境变量
+          echo "FAIL_FLAG=$FAIL_FLAG" >> $GITHUB_ENV
 
-      ###########################################################################
-      # 步骤5：同步结果汇总 + 失败通知
-      ###########################################################################
       - name: 📊 同步结果汇总
         run: |
           echo -e "\n=== 同步任务结束 ===" >> sync_logs.txt
           echo "执行时间：$(date '+%Y-%m-%d %H:%M:%S UTC')" >> sync_logs.txt
-          # 统计成功/失败仓库数
           SUCCESS_COUNT=$(grep -c "✅ 仓库 .* 同步完成" sync_logs.txt)
           FAIL_COUNT=$(grep -c "❌ 仓库 .* 同步失败" sync_logs.txt)
           SKIP_COUNT=$(grep -c "跳过该仓库" sync_logs.txt)
@@ -278,17 +234,15 @@ jobs:
           echo "  - 同步成功：$SUCCESS_COUNT 个" >> sync_logs.txt
           echo "  - 同步失败：$FAIL_COUNT 个" >> sync_logs.txt
           echo "  - 跳过仓库：$SKIP_COUNT 个" >> sync_logs.txt
-          # 输出日志到控制台（方便 GitHub Actions 查看）
           cat sync_logs.txt
 
       - name: 🚨 同步失败通知（通过 GitHub Issues）
-        if: failure() || grep -q "❌ 仓库 .* 同步失败" sync_logs.txt
+        if: failure() || env.FAIL_FLAG == '1'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          # 创建 GitHub Issue 通知失败结果
           ISSUE_TITLE="【仓库同步失败】$(date '+%Y-%m-%d')"
           ISSUE_BODY=$(cat <<EOF
           ### 同步任务失败汇总
@@ -299,11 +253,10 @@ jobs:
           
           ### 详细日志（最后200行）
           \`\`\`
-          $(cat sync_logs.txt | tail -200) # 只显示最后200行，避免日志过长
+          $(cat sync_logs.txt | tail -200)
           \`\`\`
           EOF
           )
-          # 调用 GitHub API 创建 Issue
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
