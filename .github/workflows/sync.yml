@@ -1,22 +1,14 @@
-name: 同步 Frappe 仓库
+name: 同步 Frappe 和 HRMS 仓库
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # 每天 UTC 时间 0 点同步（北京时间 8 点）
-  workflow_dispatch:  # 允许手动触发同步
+    - cron: "0 0 * * *"  # 每天 UTC 0 点（北京时间 8 点）同步
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
-  sync-repository:  # 关键修复：将中文 ID 改为符合规范的英文 ID
+  sync-repositories:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出源仓库
-        uses: actions/checkout@v6
-        with:
-          repository: frappe/frappe
-          fetch-depth: 0  # 获取完整的提交历史
-          path: source
-          timeout-minutes: 10
-
       - name: 配置 Git 环境
         run: |
           git config --global user.name "GitHub Action Sync Bot"
@@ -24,44 +16,74 @@ jobs:
           git config --global credential.helper cache
           git config --global credential.helper 'cache --timeout=3600'
 
-      - name: 同步到目标仓库
+      # ========== 同步 Frappe 仓库 ==========
+      - name: 检出 Frappe 源仓库
+        uses: actions/checkout@v6
+        with:
+          repository: frappe/frappe
+          fetch-depth: 0
+          path: frappe-source
+          timeout-minutes: 10
+
+      - name: 同步 Frappe 到目标仓库
         run: |
           set -e
-          cd source
+          cd frappe-source
           
-          # ========== 关键修复：获取并创建所有远程分支 ==========
-          echo "=== 列出所有上游远程分支 ==="
-          # 列出所有远程分支（排除 HEAD 指针）
+          # 列出并创建所有远程分支
+          echo "=== [Frappe] 列出所有上游远程分支 ==="
           git branch -r | grep -v '\->' | grep -v 'HEAD' > remote-branches.txt
           cat remote-branches.txt
           
-          echo "=== 创建并检出所有远程分支到本地 ==="
-          # 遍历所有远程分支，创建对应的本地分支并跟踪
+          echo "=== [Frappe] 创建本地分支 ==="
           while read -r branch; do
-            # 去掉前缀 origin/，得到纯分支名
             local_branch="${branch#origin/}"
-            # 检出分支（如果不存在则创建），并跟踪远程分支
             git checkout -B "$local_branch" "$branch"
-            echo "已创建本地分支：$local_branch"
+            echo "已创建 Frappe 本地分支：$local_branch"
           done < remote-branches.txt
           
-          # ========== 原有同步逻辑 ==========
-          echo "=== 当前本地所有分支 ==="
-          git branch -a
-          
-          echo "=== 添加目标远程仓库 ==="
+          # 推送至目标仓库
+          echo "=== [Frappe] 推送分支和标签 ==="
           git remote add target https://x-access-token:${{ secrets.CNB_TOKEN }}@cnb.cool/frappecn/frappe.git
-          
-          echo "=== 拉取目标仓库最新信息 ==="
-          git fetch target || echo "警告：拉取目标仓库失败，继续执行推送操作"
-          
-          echo "=== 推送所有分支到目标仓库 ==="
+          git fetch target || echo "[Frappe] 拉取目标仓库失败，继续推送"
           git push target --all --force
-          
-          echo "=== 推送所有标签到目标仓库 ==="
           git push target --tags --force
           
-          echo "=== 同步完成，所有分支和标签已推送 ==="
-        env:
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          echo "=== [Frappe] 同步完成 ==="
+        timeout-minutes: 15
+
+      # ========== 同步 HRMS 仓库 ==========
+      - name: 检出 HRMS 源仓库
+        uses: actions/checkout@v6
+        with:
+          repository: frappe/hrms
+          fetch-depth: 0
+          path: hrms-source
+          timeout-minutes: 10
+
+      - name: 同步 HRMS 到目标仓库
+        run: |
+          set -e
+          cd hrms-source
+          
+          # 列出并创建所有远程分支
+          echo "=== [HRMS] 列出所有上游远程分支 ==="
+          git branch -r | grep -v '\->' | grep -v 'HEAD' > remote-branches.txt
+          cat remote-branches.txt
+          
+          echo "=== [HRMS] 创建本地分支 ==="
+          while read -r branch; do
+            local_branch="${branch#origin/}"
+            git checkout -B "$local_branch" "$branch"
+            echo "已创建 HRMS 本地分支：$local_branch"
+          done < remote-branches.txt
+          
+          # 推送至目标仓库（注意目标地址是 frappecn/hrms）
+          echo "=== [HRMS] 推送分支和标签 ==="
+          git remote add target https://x-access-token:${{ secrets.CNB_TOKEN }}@cnb.cool/frappecn/hrms.git
+          git fetch target || echo "[HRMS] 拉取目标仓库失败，继续推送"
+          git push target --all --force
+          git push target --tags --force
+          
+          echo "=== [HRMS] 同步完成 ==="
         timeout-minutes: 15
