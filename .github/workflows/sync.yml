@@ -6,7 +6,7 @@ on:
   workflow_dispatch:  # 允许手动触发同步
 
 jobs:
-  同步仓库:
+  sync-repository:  # 关键修复：将中文 ID 改为符合规范的英文 ID
     runs-on: ubuntu-latest
     steps:
       - name: 检出源仓库
